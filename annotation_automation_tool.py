@@ -196,11 +196,32 @@ def interactive_config():
     # Pipeline options
     print(f"\n⚙️  PIPELINE OPTIONS")
     print("-" * 30)
-    
+     
     enable_cleaning = input("Enable dataset cleaning/filtering? (y/n, default: y): ").strip().lower()
     config['enable_cleaning'] = enable_cleaning != 'n'
     
-    enable_cvat = input("Enable CVAT format conversion? (y/n, default: y): ").strip().lower()
+    if config['enable_cleaning']:
+        print(f"\n📏 BOUNDING BOX FILTERING")
+        print("-" * 30)
+        print("Remove small bounding boxes to eliminate unwanted annotations")
+        
+        while True:
+            try:
+                min_height_input = input("Minimum bounding box height in pixels (or press Enter for 150): ").strip()
+                if not min_height_input:
+                    min_height = 150
+                else:
+                    min_height = int(min_height_input)
+                
+                if min_height > 0:
+                    config['min_box_height'] = min_height
+                    break
+                else:
+                    print("❌ Minimum height must be greater than 0")
+            except ValueError:
+                print("❌ Please enter a valid number")
+    
+    enable_cvat = input("\nEnable CVAT format conversion? (y/n, default: y): ").strip().lower()
     config['enable_cvat_conversion'] = enable_cvat != 'n'
     
     return config
@@ -375,42 +396,71 @@ class AnnotationAutomationTool:
         logging.info(f"✅ Copied {image_count} images and {label_count} label files to YOLO dataset structure.")
     
     def clean_dataset(self):
-        """Filter annotations to keep only specified classes"""
-        logging.info("=== STEP 4: Cleaning dataset (filtering classes) ===")
+        """Filter annotations to keep only specified classes and remove small bounding boxes"""
+        logging.info("=== STEP 4: Cleaning dataset (filtering classes and small boxes) ===")
         
         labels_dir = f"{self.config['yolo_dataset_dir']}/labels"
+        images_dir = f"{self.config['yolo_dataset_dir']}/images"
         removed_count = 0
         kept_count = 0
+        small_box_count = 0
 
         for filename in os.listdir(labels_dir):
             if not filename.endswith('.txt'):
                 continue
 
             filepath = os.path.join(labels_dir, filename)
+            image_path = os.path.join(images_dir, filename.replace('.txt', '.jpg'))
+            
+            # Get image dimensions for height calculation
+            if os.path.exists(image_path):
+                img = cv2.imread(image_path)
+                img_height, img_width = img.shape[:2]
+            else:
+                # Fallback if image not found
+                img_height, img_width = 1080, 1920  # Default dimensions
             
             with open(filepath, 'r') as file:
                 lines = file.readlines()
 
-            # Filter to keep only specified classes
+            # Filter to keep only specified classes and remove small boxes
             filtered_lines = []
             for line in lines:
                 line = line.strip()
                 if line:
-                    cls = int(line.split()[0])
+                    parts = line.split()
+                    cls = int(parts[0])
+                    
+                    # Check if class is in keep_classes
                     if cls in self.config['keep_classes']:
-                        filtered_lines.append(line + '\n')
+                        # Check bounding box height (convert from normalized to pixel coordinates)
+                        if len(parts) >= 5:
+                            _, center_y, _, _, height_norm = map(float, parts[:5])
+                            height_pixels = height_norm * img_height
+                            
+                            # Keep only boxes with height >= minimum threshold
+                            min_height = self.config.get('min_box_height', 150)
+                            if height_pixels >= min_height:
+                                filtered_lines.append(line + '\n')
+                                kept_count += 1
+                            else:
+                                small_box_count += 1
+                        else:
+                            # If we can't parse the line properly, keep it
+                            filtered_lines.append(line + '\n')
+                            kept_count += 1
 
             # Write back filtered lines
             with open(filepath, 'w') as file:
                 file.writelines(filtered_lines)
 
             removed = len(lines) - len(filtered_lines)
-            kept = len(filtered_lines)
             removed_count += removed
-            kept_count += kept
 
+        min_height = self.config.get('min_box_height', 150)
         logging.info(f"✅ Cleaned YOLO labels in '{labels_dir}'")
-        logging.info(f"Kept {kept_count} objects, removed {removed_count} from all files.")
+        logging.info(f"Kept {kept_count} objects, removed {removed_count} objects total")
+        logging.info(f"Removed {small_box_count} bounding boxes with height < {min_height} pixels")
     
     def convert_to_cvat(self):
         """Convert YOLO format to CVAT format using Datumaro"""
