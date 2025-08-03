@@ -3,6 +3,8 @@ import os
 import logging
 import shutil
 import subprocess
+import argparse
+import sys
 from tqdm import tqdm
 from ultralytics import YOLO
 
@@ -12,6 +14,222 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+def clear_console():
+    """Clear the console screen"""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def print_banner():
+    """Print the tool banner"""
+    banner = """
+╔══════════════════════════════════════════════════════════════╗
+║                    ANNOTATION AUTOMATION TOOL                ║
+║                        Powered by YOLOv8                     ║
+║                    For CVAT Dataset Preparation              ║
+╚══════════════════════════════════════════════════════════════╝
+    """
+    print(banner)
+
+def get_video_info(video_path):
+    """Get video information including FPS"""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = frame_count / fps if fps > 0 else 0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    cap.release()
+    
+    return {
+        'fps': fps,
+        'frame_count': frame_count,
+        'duration': duration,
+        'width': width,
+        'height': height
+    }
+
+def interactive_config():
+    """Interactive configuration setup"""
+    print_banner()
+    print("🎯 Welcome to the Annotation Automation Tool!")
+    print("Let's configure your annotation pipeline...\n")
+    
+    config = {}
+    
+    # Video path
+    print("📹 VIDEO CONFIGURATION")
+    print("-" * 30)
+    
+    while True:
+        video_path = input("Enter video file path (or press Enter for 'video11.mp4'): ").strip()
+        if not video_path:
+            video_path = 'video11.mp4'
+        
+        if os.path.exists(video_path):
+            video_info = get_video_info(video_path)
+            if video_info:
+                print(f"✅ Video found! FPS: {video_info['fps']:.2f}, Duration: {video_info['duration']:.2f}s")
+                config['video_path'] = video_path
+                config['original_fps'] = video_info['fps']
+                break
+            else:
+                print("❌ Could not read video file. Please check the file format.")
+        else:
+            print(f"❌ File not found: {video_path}")
+    
+    # Target FPS
+    print(f"\n🎬 FRAME EXTRACTION")
+    print("-" * 30)
+    print(f"Original video FPS: {video_info['fps']:.2f}")
+    
+    while True:
+        try:
+            target_fps_input = input("Enter target FPS for frame extraction (or press Enter for 10 FPS): ").strip()
+            if not target_fps_input:
+                target_fps = 10
+            else:
+                target_fps = float(target_fps_input)
+            
+            if target_fps > 0 and target_fps <= video_info['fps']:
+                config['target_fps'] = target_fps
+                break
+            else:
+                print(f"❌ Target FPS must be between 0 and {video_info['fps']:.2f}")
+        except ValueError:
+            print("❌ Please enter a valid number")
+    
+    # Model selection
+    print(f"\n🤖 YOLO MODEL CONFIGURATION")
+    print("-" * 30)
+    
+    model_options = {
+        '1': 'yolov8n.pt (nano - fastest)',
+        '2': 'yolov8s.pt (small)',
+        '3': 'yolov8m.pt (medium)',
+        '4': 'yolov8l.pt (large)',
+        '5': 'yolov8x.pt (xlarge - most accurate)',
+        '6': 'Custom model path'
+    }
+    
+    for key, value in model_options.items():
+        print(f"{key}. {value}")
+    
+    while True:
+        model_choice = input("\nSelect model (1-6): ").strip()
+        if model_choice in model_options:
+            if model_choice == '6':
+                model_path = input("Enter custom model path: ").strip()
+                if os.path.exists(model_path):
+                    config['model_path'] = model_path
+                    break
+                else:
+                    print("❌ Model file not found!")
+            else:
+                model_path = model_options[model_choice].split(' ')[0]
+                config['model_path'] = model_path
+                break
+        else:
+            print("❌ Please select a valid option (1-6)")
+    
+    # Output directories
+    print(f"\n📁 OUTPUT CONFIGURATION")
+    print("-" * 30)
+    
+    frames_dir = input("Frames directory (or press Enter for 'frames'): ").strip() or 'frames'
+    labels_dir = input("Labels directory (or press Enter for 'yolo_labels'): ").strip() or 'yolo_labels'
+    yolo_dataset_dir = input("YOLO dataset directory (or press Enter for 'yolo_dataset'): ").strip() or 'yolo_dataset'
+    cvat_output_dir = input("CVAT output directory (or press Enter for 'cvat_format'): ").strip() or 'cvat_format'
+    
+    config.update({
+        'frames_dir': frames_dir,
+        'labels_dir': labels_dir,
+        'yolo_dataset_dir': yolo_dataset_dir,
+        'cvat_output_dir': cvat_output_dir
+    })
+    
+    # Class configuration
+    print(f"\n🏷️  CLASS CONFIGURATION")
+    print("-" * 30)
+    
+    class_options = {
+        '1': 'Person only (class 0)',
+        '2': 'Person + Car (classes 0, 2)',
+        '3': 'Person + Car + Bicycle (classes 0, 2, 1)',
+        '4': 'All COCO classes (0-79)',
+        '5': 'Custom classes'
+    }
+    
+    for key, value in class_options.items():
+        print(f"{key}. {value}")
+    
+    while True:
+        class_choice = input("\nSelect class configuration (1-5): ").strip()
+        if class_choice == '1':
+            config['classes'] = ['person']
+            config['keep_classes'] = [0]
+            break
+        elif class_choice == '2':
+            config['classes'] = ['person', 'car']
+            config['keep_classes'] = [0, 2]
+            break
+        elif class_choice == '3':
+            config['classes'] = ['person', 'car', 'bicycle']
+            config['keep_classes'] = [0, 2, 1]
+            break
+        elif class_choice == '4':
+            config['classes'] = ['person'] + [f'class_{i}' for i in range(1, 80)]
+            config['keep_classes'] = list(range(80))
+            break
+        elif class_choice == '5':
+            custom_classes = input("Enter class names separated by commas: ").strip()
+            config['classes'] = [c.strip() for c in custom_classes.split(',')]
+            keep_input = input("Enter class indices to keep separated by commas: ").strip()
+            config['keep_classes'] = [int(c.strip()) for c in keep_input.split(',')]
+            break
+        else:
+            print("❌ Please select a valid option (1-5)")
+    
+    # Pipeline options
+    print(f"\n⚙️  PIPELINE OPTIONS")
+    print("-" * 30)
+    
+    enable_cleaning = input("Enable dataset cleaning/filtering? (y/n, default: y): ").strip().lower()
+    config['enable_cleaning'] = enable_cleaning != 'n'
+    
+    enable_cvat = input("Enable CVAT format conversion? (y/n, default: y): ").strip().lower()
+    config['enable_cvat_conversion'] = enable_cvat != 'n'
+    
+    return config
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Annotation Automation Tool - Convert videos to CVAT-ready datasets using YOLOv8',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python annotation_automation_tool.py                    # Interactive mode
+  python annotation_automation_tool.py --video video.mp4  # Quick start with video
+  python annotation_automation_tool.py --config config.json # Load from config file
+        """
+    )
+    
+    parser.add_argument('--video', '-v', help='Input video file path')
+    parser.add_argument('--model', '-m', help='YOLO model path (default: yolov8n.pt)')
+    parser.add_argument('--fps', '-f', type=float, help='Target FPS for frame extraction (default: 10)')
+    parser.add_argument('--classes', '-c', help='Comma-separated class names')
+    parser.add_argument('--keep-classes', '-k', help='Comma-separated class indices to keep')
+    parser.add_argument('--output-dir', '-o', help='Output directory prefix')
+    parser.add_argument('--no-cleaning', action='store_true', help='Disable dataset cleaning')
+    parser.add_argument('--no-cvat', action='store_true', help='Disable CVAT conversion')
+    parser.add_argument('--config', help='Load configuration from JSON file')
+    parser.add_argument('--interactive', '-i', action='store_true', help='Force interactive mode')
+    
+    return parser.parse_args()
 
 class AnnotationAutomationTool:
     def __init__(self, config):
@@ -49,7 +267,7 @@ class AnnotationAutomationTool:
             logging.error("❌ Could not open input video.")
             return False
 
-        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        original_fps = self.config.get('original_fps', cap.get(cv2.CAP_PROP_FPS))
         interval = int(round(original_fps / self.config['target_fps']))
         frame_idx = 0
         saved_idx = 0
@@ -78,7 +296,13 @@ class AnnotationAutomationTool:
         """Run YOLO inference on extracted frames"""
         logging.info("=== STEP 2: Running YOLO auto-annotation ===")
         
-        for img_path in tqdm(frame_paths, desc="Annotating"):
+        # Clear console before starting annotation
+        
+        
+        for img_path in tqdm(frame_paths, desc="Annotating", unit="frame"):
+            clear_console()
+            print("🤖 Running YOLO auto-annotation...")
+            print("=" * 50)
             results = self.model(img_path)[0]
             h, w = cv2.imread(img_path).shape[:2]
 
@@ -217,29 +441,45 @@ class AnnotationAutomationTool:
 
 
 def main():
-    """Main function with default configuration"""
+    """Main function with command line interface"""
+    args = parse_arguments()
     
-    # Default configuration - modify as needed
-    config = {
-        # Input/Output paths
-        'video_path': 'video11.mp4',
-        'frames_dir': 'frames',
-        'labels_dir': 'yolo_labels',
-        'yolo_dataset_dir': 'yolo_dataset',
-        'cvat_output_dir': 'cvat_format',
+    # Determine configuration method
+    if args.interactive or (not args.video and not args.config):
+        # Interactive mode
+        config = interactive_config()
+    else:
+        # Command line mode
+        config = {
+            'video_path': args.video or 'video11.mp4',
+            'model_path': args.model or 'yolov8n.pt',
+            'target_fps': args.fps or 10,
+            'frames_dir': 'frames',
+            'labels_dir': 'yolo_labels',
+            'yolo_dataset_dir': 'yolo_dataset',
+            'cvat_output_dir': 'cvat_format',
+            'classes': ['person', 'car', 'bicycle'],
+            'keep_classes': [0],
+            'enable_cleaning': not args.no_cleaning,
+            'enable_cvat_conversion': not args.no_cvat,
+        }
         
-        # Model configuration
-        'model_path': 'yolov8n.pt',
-        'target_fps': 10,  # Match CVAT import FPS
-        
-        # Class configuration
-        'classes': ['person', 'car', 'bicycle'],  # YOLO class names
-        'keep_classes': [0],  # Class indices to keep (0 = person)
-        
-        # Pipeline options
-        'enable_cleaning': True,  # Enable dataset cleaning
-        'enable_cvat_conversion': True,  # Enable CVAT conversion
-    }
+        # Override with command line arguments
+        if args.classes:
+            config['classes'] = [c.strip() for c in args.classes.split(',')]
+        if args.keep_classes:
+            config['keep_classes'] = [int(c.strip()) for c in args.keep_classes.split(',')]
+        if args.output_dir:
+            config['frames_dir'] = f"{args.output_dir}_frames"
+            config['labels_dir'] = f"{args.output_dir}_labels"
+            config['yolo_dataset_dir'] = f"{args.output_dir}_dataset"
+            config['cvat_output_dir'] = f"{args.output_dir}_cvat"
+    
+    # Get video info for FPS
+    if 'original_fps' not in config:
+        video_info = get_video_info(config['video_path'])
+        if video_info:
+            config['original_fps'] = video_info['fps']
     
     # Create and run the automation tool
     tool = AnnotationAutomationTool(config)
