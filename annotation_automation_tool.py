@@ -296,27 +296,51 @@ class AnnotationAutomationTool:
         """Run YOLO inference on extracted frames"""
         logging.info("=== STEP 2: Running YOLO auto-annotation ===")
         
-        # Clear console before starting annotation
+        # Clear console and set up the display
+        clear_console()
+        print("🤖 Running YOLO auto-annotation...")
+        print("=" * 50)
+        print(f"📊 Processing {len(frame_paths)} frames...")
+        print()
         
+        # Suppress YOLO's verbose output
+        import warnings
+        warnings.filterwarnings('ignore')
         
-        for img_path in tqdm(frame_paths, desc="Annotating", unit="frame"):
-            clear_console()
-            print("🤖 Running YOLO auto-annotation...")
-            print("=" * 50)
-            results = self.model(img_path)[0]
-            h, w = cv2.imread(img_path).shape[:2]
+        # Use tqdm with dynamic_ncols=True and proper positioning
+        with tqdm(frame_paths, desc="Annotating", unit="frame", 
+                 dynamic_ncols=True, position=0, leave=True, 
+                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            
+            for img_path in pbar:
+                # Suppress YOLO's print output by redirecting stdout temporarily
+                import sys
+                from io import StringIO
+                
+                # Capture YOLO's output
+                old_stdout = sys.stdout
+                sys.stdout = StringIO()
+                
+                try:
+                    results = self.model(img_path, verbose=False)[0]
+                finally:
+                    # Restore stdout
+                    sys.stdout = old_stdout
+                
+                h, w = cv2.imread(img_path).shape[:2]
 
-            label_file = os.path.join(self.config['labels_dir'], os.path.basename(img_path).replace(".jpg", ".txt"))
-            with open(label_file, "w") as f:
-                for box in results.boxes:
-                    cls = int(box.cls[0])
-                    x1, y1, x2, y2 = box.xyxy[0]
-                    xc = ((x1 + x2) / 2) / w
-                    yc = ((y1 + y2) / 2) / h
-                    bw = (x2 - x1) / w
-                    bh = (y2 - y1) / h
-                    f.write(f"{cls} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
+                label_file = os.path.join(self.config['labels_dir'], os.path.basename(img_path).replace(".jpg", ".txt"))
+                with open(label_file, "w") as f:
+                    for box in results.boxes:
+                        cls = int(box.cls[0])
+                        x1, y1, x2, y2 = box.xyxy[0]
+                        xc = ((x1 + x2) / 2) / w
+                        yc = ((y1 + y2) / 2) / h
+                        bw = (x2 - x1) / w
+                        bh = (y2 - y1) / h
+                        f.write(f"{cls} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
 
+        print()  # Add space after progress bar
         logging.info(f"✅ YOLO annotations complete. Labels saved in: {self.config['labels_dir']}")
     
     def prepare_yolo_dataset(self):
