@@ -9,6 +9,30 @@ import json
 import numpy as np
 from tqdm import tqdm
 from ultralytics import YOLO
+from abc import ABC, abstractmethod
+
+# --- Abstract Base Classes ---
+class BaseAnnotator(ABC):
+    """Abstract base class for all annotators"""
+    
+    def __init__(self, config):
+        self.config = config
+        self.labels_dir = config['labels_dir']
+    
+    @abstractmethod
+    def annotate_frame(self, img_path):
+        """Annotate a single frame"""
+        pass
+    
+    @abstractmethod
+    def convert_to_cvat(self):
+        """Convert annotations to CVAT format"""
+        pass
+    
+    @abstractmethod
+    def get_output_info(self):
+        """Get output information for success message"""
+        pass
 
 # --- Pose Detection Constants ---
 # Body Keypoint names (excluding head keypoints)
@@ -107,6 +131,58 @@ def calculate_iou(box1, box2):
     union = area1 + area2 - intersection
     
     return intersection / union if union > 0 else 0.0
+
+# --- Concrete Annotator Classes ---
+class BoundingBoxAnnotator(BaseAnnotator):
+    """Handles traditional bounding box annotations"""
+    
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = YOLO(config['model_path'])
+    
+    def annotate_frame(self, img_path):
+        """Annotate frame with bounding boxes only"""
+        results = self.model(img_path, verbose=False)[0]
+        h, w = cv2.imread(img_path).shape[:2]
+
+        label_file = os.path.join(self.labels_dir, os.path.basename(img_path).replace(".jpg", ".txt"))
+        with open(label_file, "w") as f:
+            for box in results.boxes:
+                cls = int(box.cls[0])
+                x1, y1, x2, y2 = box.xyxy[0]
+                xc = ((x1 + x2) / 2) / w
+                yc = ((y1 + y2) / 2) / h
+                bw = (x2 - x1) / w
+                bh = (y2 - y1) / h
+                f.write(f"{cls} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
+    
+    def convert_to_cvat(self):
+        """Convert YOLO format to CVAT format using Datumaro"""
+        logging.info("=== STEP 5: Converting to CVAT format ===")
+        
+        def run_command(command, description):
+            logging.info(description)
+            try:
+                subprocess.run(command, shell=True, check=True)
+                logging.info("✅ Success")
+            except subprocess.CalledProcessError as e:
+                logging.error(f"❌ Command failed: {e}")
+                return False
+            return True
+        
+        command = f"datum convert -if yolo -i {self.config['yolo_dataset_dir']} -f cvat -o {self.config['cvat_output_dir']} --overwrite"
+        success = run_command(command, "Converting YOLO to CVAT format...")
+        
+        if success:
+            logging.info(f"🎯 Conversion complete! Find your CVAT dataset at: {self.config['cvat_output_dir']}")
+        else:
+            logging.error("❌ CVAT conversion failed!")
+        
+        return success
+    
+    def get_output_info(self):
+        """Get output information for success message"""
+        return f"📋 CVAT format ready at: {self.config['cvat_output_dir']}"
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -294,21 +370,45 @@ def interactive_config():
             else:
                 print("❌ Please select a valid option (1-6)")
     
-    # Output directories
+    # Output directory configuration
     print(f"\n📁 OUTPUT CONFIGURATION")
     print("-" * 30)
     
-    frames_dir = input("Frames directory (or press Enter for 'frames'): ").strip() or 'frames'
-    labels_dir = input("Labels directory (or press Enter for 'yolo_labels'): ").strip() or 'yolo_labels'
-    yolo_dataset_dir = input("YOLO dataset directory (or press Enter for 'yolo_dataset'): ").strip() or 'yolo_dataset'
-    cvat_output_dir = input("CVAT output directory (or press Enter for 'cvat_format'): ").strip() or 'cvat_format'
+    print("You can specify a main output directory where all generated files will be organized.")
+    output_dir = input("Main output directory (or press Enter to use current directory): ").strip()
     
-    config.update({
-        'frames_dir': frames_dir,
-        'labels_dir': labels_dir,
-        'yolo_dataset_dir': yolo_dataset_dir,
-        'cvat_output_dir': cvat_output_dir
-    })
+    if output_dir:
+        # Create subdirectories inside the main output directory
+        config.update({
+            'frames_dir': os.path.join(output_dir, 'frames'),
+            'labels_dir': os.path.join(output_dir, 'labels'),
+            'yolo_dataset_dir': os.path.join(output_dir, 'yolo_dataset')
+        })
+        
+        # Set output directory based on annotation type
+        if config.get('annotation_type') == 'bbox_with_skeleton':
+            config['coco_output_dir'] = os.path.join(output_dir, 'coco_format')
+        else:
+            config['cvat_output_dir'] = os.path.join(output_dir, 'cvat_format')
+    else:
+        # Use individual directory names in current directory
+        frames_dir = input("Frames directory (or press Enter for 'frames'): ").strip() or 'frames'
+        labels_dir = input("Labels directory (or press Enter for 'yolo_labels'): ").strip() or 'yolo_labels'
+        yolo_dataset_dir = input("YOLO dataset directory (or press Enter for 'yolo_dataset'): ").strip() or 'yolo_dataset'
+        
+        config.update({
+            'frames_dir': frames_dir,
+            'labels_dir': labels_dir,
+            'yolo_dataset_dir': yolo_dataset_dir
+        })
+        
+        # Set output directory based on annotation type
+        if config.get('annotation_type') == 'bbox_with_skeleton':
+            coco_output_dir = input("COCO output directory (or press Enter for 'coco_format'): ").strip() or 'coco_format'
+            config['coco_output_dir'] = coco_output_dir
+        else:
+            cvat_output_dir = input("CVAT output directory (or press Enter for 'cvat_format'): ").strip() or 'cvat_format'
+            config['cvat_output_dir'] = cvat_output_dir
     
     # Class configuration
     print(f"\n🏷️  CLASS CONFIGURATION")
@@ -403,7 +503,7 @@ Examples:
     parser.add_argument('--fps', '-f', type=float, help='Target FPS for frame extraction (default: 10)')
     parser.add_argument('--classes', '-c', help='Comma-separated class names')
     parser.add_argument('--keep-classes', '-k', help='Comma-separated class indices to keep')
-    parser.add_argument('--output-dir', '-o', help='Output directory prefix')
+    parser.add_argument('--output-dir', '-o', help='Output directory for all generated files (creates subdirectories inside)')
     parser.add_argument('--no-cleaning', action='store_true', help='Disable dataset cleaning')
     parser.add_argument('--no-cvat', action='store_true', help='Disable CVAT conversion')
     parser.add_argument('--config', help='Load configuration from JSON file')
@@ -414,150 +514,25 @@ Examples:
     
     return parser.parse_args()
 
-class AnnotationAutomationTool:
+class CombinedAnnotator(BaseAnnotator):
+    """Handles both bounding boxes and skeleton annotations"""
+    
     def __init__(self, config):
-        """
-        Initialize the annotation automation tool with configuration
-        
-        Args:
-            config (dict): Configuration dictionary containing all parameters
-        """
-        self.config = config
-        self.setup_directories()
-        
-        # Initialize detection model
-        self.model = YOLO(config['model_path'])
-        
-        # Initialize pose model if needed
-        if config.get('use_pose_model', False):
-            pose_model_path = config.get('pose_model_path', 'yolov8m-pose.pt')
-            self.pose_model = YOLO(pose_model_path)
-            logging.info(f"🤖 Loaded pose model: {pose_model_path}")
-        else:
-            self.pose_model = None
-        
-    def setup_directories(self):
-        """Create necessary directories"""
-        directories = [
-            self.config['frames_dir'],
-            self.config['labels_dir'],
-            self.config['yolo_dataset_dir'],
-            f"{self.config['yolo_dataset_dir']}/images",
-            f"{self.config['yolo_dataset_dir']}/labels",
-            self.config['cvat_output_dir']
-        ]
-        
-        for directory in directories:
-            os.makedirs(directory, exist_ok=True)
-            logging.info(f"Created directory: {directory}")
+        super().__init__(config)
+        self.detection_model = YOLO(config['model_path'])
+        self.pose_model = YOLO(config.get('pose_model_path', 'yolov8m-pose.pt'))
+        logging.info(f"🤖 Loaded pose model: {config.get('pose_model_path', 'yolov8m-pose.pt')}")
     
-    def extract_frames(self):
-        """Extract frames from video at specified FPS"""
-        logging.info("=== STEP 1: Extracting frames from video ===")
-        
-        cap = cv2.VideoCapture(self.config['video_path'])
-        if not cap.isOpened():
-            logging.error("❌ Could not open input video.")
-            return False
-
-        original_fps = self.config.get('original_fps', cap.get(cv2.CAP_PROP_FPS))
-        interval = int(round(original_fps / self.config['target_fps']))
-        frame_idx = 0
-        saved_idx = 0
-        frame_paths = []
-
-        logging.info(f"Original video FPS: {original_fps:.2f}, Target FPS: {self.config['target_fps']}, Extracting every {interval} frames")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if frame_idx % interval == 0:
-                frame_file = os.path.join(self.config['frames_dir'], f"{saved_idx:05d}.jpg")
-                cv2.imwrite(frame_file, frame)
-                frame_paths.append(frame_file)
-                saved_idx += 1
-
-            frame_idx += 1
-
-        cap.release()
-        logging.info(f"✅ Extracted {saved_idx} frames at {self.config['target_fps']} FPS to: {self.config['frames_dir']}")
-        return frame_paths
-    
-    def auto_annotate(self, frame_paths):
-        """Run YOLO inference on extracted frames"""
-        annotation_type = self.config.get('annotation_type', 'bbox_only')
-        
-        if annotation_type == 'bbox_only':
-            logging.info("=== STEP 2: Running YOLO bounding box annotation ===")
-        else:  # bbox_with_skeleton
-            logging.info("=== STEP 2: Running YOLO annotation (bounding boxes + skeletons) ===")
-        
-        # Clear console and set up the display
-        clear_console()
-        print("🤖 Running YOLO auto-annotation...")
-        print("=" * 50)
-        print(f"📊 Processing {len(frame_paths)} frames...")
-        print(f"🎯 Annotation type: {annotation_type}")
-        print()
-        
-        # Suppress YOLO's verbose output
-        import warnings
-        warnings.filterwarnings('ignore')
-        
-        # Use tqdm with dynamic_ncols=True and proper positioning
-        with tqdm(frame_paths, desc="Annotating", unit="frame", 
-                 dynamic_ncols=True, position=0, leave=True, 
-                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
-            
-            for img_path in pbar:
-                # Suppress YOLO's print output by redirecting stdout temporarily
-                import sys
-                from io import StringIO
-                
-                # Capture YOLO's output
-                old_stdout = sys.stdout
-                sys.stdout = StringIO()
-                
-                try:
-                    if annotation_type == 'bbox_only':
-                        self._annotate_bbox_only(img_path)
-                    else:  # bbox_with_skeleton
-                        self._annotate_with_skeleton(img_path)
-                finally:
-                    # Restore stdout
-                    sys.stdout = old_stdout
-
-        print()  # Add space after progress bar
-        logging.info(f"✅ YOLO annotations complete. Labels saved in: {self.config['labels_dir']}")
-    
-    def _annotate_bbox_only(self, img_path):
-        """Annotate frame with bounding boxes only"""
-        results = self.model(img_path, verbose=False)[0]
-        h, w = cv2.imread(img_path).shape[:2]
-
-        label_file = os.path.join(self.config['labels_dir'], os.path.basename(img_path).replace(".jpg", ".txt"))
-        with open(label_file, "w") as f:
-            for box in results.boxes:
-                cls = int(box.cls[0])
-                x1, y1, x2, y2 = box.xyxy[0]
-                xc = ((x1 + x2) / 2) / w
-                yc = ((y1 + y2) / 2) / h
-                bw = (x2 - x1) / w
-                bh = (y2 - y1) / h
-                f.write(f"{cls} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
-    
-    def _annotate_with_skeleton(self, img_path):
+    def annotate_frame(self, img_path):
         """Annotate frame with both bounding boxes and skeleton keypoints"""
         # Run detection model for bounding boxes
-        bbox_results = self.model(img_path, verbose=False)[0]
+        bbox_results = self.detection_model(img_path, verbose=False)[0]
         
         # Run pose model for keypoints
         pose_results = self.pose_model(img_path, verbose=False)[0]
         
         h, w = cv2.imread(img_path).shape[:2]
-        label_file = os.path.join(self.config['labels_dir'], os.path.basename(img_path).replace(".jpg", ".txt"))
+        label_file = os.path.join(self.labels_dir, os.path.basename(img_path).replace(".jpg", ".txt"))
         
         # Collect pose detections
         pose_detections = []
@@ -660,153 +635,20 @@ class AnnotationAutomationTool:
                     # Bbox only
                     f.write(f"{bbox['class']} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
     
-    def prepare_yolo_dataset(self):
-        """Organize data into YOLO dataset structure"""
-        logging.info("=== STEP 3: Preparing YOLO dataset structure ===")
-        
-        # Save class names
-        class_path = os.path.join(self.config['yolo_dataset_dir'], "obj.names")
-        with open(class_path, "w") as f:
-            for c in self.config['classes']:
-                f.write(c + "\n")
-        logging.info(f"Saved class labels to: {class_path}")
-
-        # Copy images
-        image_count = 0
-        for fname in os.listdir(self.config['frames_dir']):
-            if fname.endswith('.jpg'):
-                src = os.path.join(self.config['frames_dir'], fname)
-                dst = os.path.join(self.config['yolo_dataset_dir'], "images", fname)
-                shutil.copy(src, dst)
-                image_count += 1
-
-        # Copy labels
-        label_count = 0
-        for fname in os.listdir(self.config['labels_dir']):
-            if fname.endswith('.txt'):
-                src = os.path.join(self.config['labels_dir'], fname)
-                dst = os.path.join(self.config['yolo_dataset_dir'], "labels", fname)
-                shutil.copy(src, dst)
-                label_count += 1
-
-        logging.info(f"✅ Copied {image_count} images and {label_count} label files to YOLO dataset structure.")
-    
-    def clean_dataset(self):
-        """Filter annotations to keep only specified classes and remove small bounding boxes"""
-        logging.info("=== STEP 4: Cleaning dataset (filtering classes and small boxes) ===")
-        
-        labels_dir = f"{self.config['yolo_dataset_dir']}/labels"
-        images_dir = f"{self.config['yolo_dataset_dir']}/images"
-        removed_count = 0
-        kept_count = 0
-        small_box_count = 0
-
-        for filename in os.listdir(labels_dir):
-            if not filename.endswith('.txt'):
-                continue
-
-            filepath = os.path.join(labels_dir, filename)
-            image_path = os.path.join(images_dir, filename.replace('.txt', '.jpg'))
-            
-            # Get image dimensions for height calculation
-            if os.path.exists(image_path):
-                img = cv2.imread(image_path)
-                img_height, img_width = img.shape[:2]
-            else:
-                # Fallback if image not found
-                img_height, img_width = 1080, 1920  # Default dimensions
-            
-            with open(filepath, 'r') as file:
-                lines = file.readlines()
-
-            # Filter to keep only specified classes and remove small boxes
-            filtered_lines = []
-            for line in lines:
-                line = line.strip()
-                if line:
-                    parts = line.split()
-                    cls = int(parts[0])
-                    
-                    # Check if class is in keep_classes
-                    if cls in self.config['keep_classes']:
-                        # Check bounding box height (convert from normalized to pixel coordinates)
-                        if len(parts) >= 5:
-                            _, center_y, _, _, height_norm = map(float, parts[:5])
-                            height_pixels = height_norm * img_height
-                            
-                            # Keep only boxes with height >= minimum threshold
-                            min_height = self.config.get('min_box_height', 150)
-                            if height_pixels >= min_height:
-                                filtered_lines.append(line + '\n')
-                                kept_count += 1
-                            else:
-                                small_box_count += 1
-                        else:
-                            # If we can't parse the line properly, keep it
-                            filtered_lines.append(line + '\n')
-                            kept_count += 1
-
-            # Write back filtered lines
-            with open(filepath, 'w') as file:
-                file.writelines(filtered_lines)
-
-            removed = len(lines) - len(filtered_lines)
-            removed_count += removed
-
-        min_height = self.config.get('min_box_height', 150)
-        logging.info(f"✅ Cleaned YOLO labels in '{labels_dir}'")
-        logging.info(f"Kept {kept_count} objects, removed {removed_count} objects total")
-        logging.info(f"Removed {small_box_count} bounding boxes with height < {min_height} pixels")
-    
     def convert_to_cvat(self):
-        """Convert annotations to CVAT format"""
-        logging.info("=== STEP 5: Converting to CVAT format ===")
-        
-        annotation_type = self.config.get('annotation_type', 'bbox_only')
-        
-        if annotation_type == 'bbox_only':
-            # For bounding box only, use Datumaro YOLO conversion
-            success = self._convert_yolo_to_cvat()
-        else:
-            # For combined annotations, create COCO keypoints JSON
-            success = self._create_coco_keypoints_json()
-        
-        if success:
-            logging.info(f"🎯 Conversion complete! Find your CVAT dataset at: {self.config['cvat_output_dir']}")
-        else:
-            logging.error("❌ CVAT conversion failed!")
-        
-        return success
-    
-    def _convert_yolo_to_cvat(self):
-        """Convert YOLO format to CVAT using Datumaro"""
-        def run_command(command, description):
-            logging.info(description)
-            try:
-                subprocess.run(command, shell=True, check=True)
-                logging.info("✅ Success")
-            except subprocess.CalledProcessError as e:
-                logging.error(f"❌ Command failed: {e}")
-                return False
-            return True
-        
-        command = f"datum convert -if yolo -i {self.config['yolo_dataset_dir']} -f cvat -o {self.config['cvat_output_dir']} --overwrite"
-        return run_command(command, "Converting YOLO to CVAT format...")
-    
-    def _create_coco_keypoints_json(self):
         """Create COCO keypoints JSON file with both bounding boxes and keypoints"""
-        logging.info("Creating COCO keypoints JSON with bounding boxes and keypoints...")
+        logging.info("=== STEP 5: Converting to COCO keypoints format ===")
         
         coco_data = self._generate_coco_keypoints_data()
         
-        json_file = os.path.join(self.config['cvat_output_dir'], 'person_keypoints.json')
-        os.makedirs(self.config['cvat_output_dir'], exist_ok=True)
+        json_file = os.path.join(self.config['coco_output_dir'], 'person_keypoints.json')
+        os.makedirs(self.config['coco_output_dir'], exist_ok=True)
         
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(coco_data, f, indent=2)
         
-        # Copy images to CVAT format directory
-        images_dir = os.path.join(self.config['cvat_output_dir'], 'images')
+        # Copy images to COCO format directory
+        images_dir = os.path.join(self.config['coco_output_dir'], 'images')
         os.makedirs(images_dir, exist_ok=True)
         
         yolo_images_dir = os.path.join(self.config['yolo_dataset_dir'], 'images')
@@ -1024,6 +866,240 @@ class AnnotationAutomationTool:
         
         return annotation
     
+    def get_output_info(self):
+        """Get output information for success message"""
+        return f"📋 COCO keypoints JSON ready at: {self.config['coco_output_dir']}/person_keypoints.json"
+
+# --- Annotator Factory ---
+class AnnotatorFactory:
+    """Factory class to create appropriate annotator based on configuration"""
+    
+    @staticmethod
+    def create_annotator(config):
+        annotation_type = config.get('annotation_type', 'bbox_only')
+        
+        if annotation_type == 'bbox_only':
+            return BoundingBoxAnnotator(config)
+        elif annotation_type == 'bbox_with_skeleton':
+            return CombinedAnnotator(config)
+        else:
+            raise ValueError(f"Unknown annotation type: {annotation_type}")
+
+class AnnotationAutomationTool:
+    def __init__(self, config):
+        """
+        Initialize the annotation automation tool with configuration
+        
+        Args:
+            config (dict): Configuration dictionary containing all parameters
+        """
+        self.config = config
+        self.setup_directories()
+        self.annotator = AnnotatorFactory.create_annotator(config)
+        
+    def setup_directories(self):
+        """Create necessary directories"""
+        annotation_type = self.config.get('annotation_type', 'bbox_only')
+        
+        # Base directories
+        directories = [
+            self.config['frames_dir'],
+            self.config['labels_dir'],
+            self.config['yolo_dataset_dir'],
+            f"{self.config['yolo_dataset_dir']}/images",
+            f"{self.config['yolo_dataset_dir']}/labels",
+        ]
+        
+        # Add output directory based on annotation type
+        if annotation_type == 'bbox_only':
+            directories.append(self.config['cvat_output_dir'])
+        else:  # bbox_with_skeleton
+            directories.append(self.config['coco_output_dir'])
+        
+        for directory in directories:
+            os.makedirs(directory, exist_ok=True)
+            logging.info(f"Created directory: {directory}")
+    
+    def extract_frames(self):
+        """Extract frames from video at specified FPS"""
+        logging.info("=== STEP 1: Extracting frames from video ===")
+        
+        cap = cv2.VideoCapture(self.config['video_path'])
+        if not cap.isOpened():
+            logging.error("❌ Could not open input video.")
+            return False
+
+        original_fps = self.config.get('original_fps', cap.get(cv2.CAP_PROP_FPS))
+        interval = int(round(original_fps / self.config['target_fps']))
+        frame_idx = 0
+        saved_idx = 0
+        frame_paths = []
+
+        logging.info(f"Original video FPS: {original_fps:.2f}, Target FPS: {self.config['target_fps']}, Extracting every {interval} frames")
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % interval == 0:
+                frame_file = os.path.join(self.config['frames_dir'], f"{saved_idx:05d}.jpg")
+                cv2.imwrite(frame_file, frame)
+                frame_paths.append(frame_file)
+                saved_idx += 1
+
+            frame_idx += 1
+
+        cap.release()
+        logging.info(f"✅ Extracted {saved_idx} frames at {self.config['target_fps']} FPS to: {self.config['frames_dir']}")
+        return frame_paths
+    
+    def auto_annotate(self, frame_paths):
+        """Run YOLO inference on extracted frames"""
+        annotation_type = self.config.get('annotation_type', 'bbox_only')
+        
+        if annotation_type == 'bbox_only':
+            logging.info("=== STEP 2: Running YOLO bounding box annotation ===")
+        else:  # bbox_with_skeleton
+            logging.info("=== STEP 2: Running YOLO annotation (bounding boxes + skeletons) ===")
+        
+        # Clear console and set up the display
+        clear_console()
+        print("🤖 Running YOLO auto-annotation...")
+        print("=" * 50)
+        print(f"📊 Processing {len(frame_paths)} frames...")
+        print(f"🎯 Annotation type: {annotation_type}")
+        print()
+        
+        # Suppress YOLO's verbose output
+        import warnings
+        warnings.filterwarnings('ignore')
+        
+        # Use tqdm with dynamic_ncols=True and proper positioning
+        with tqdm(frame_paths, desc="Annotating", unit="frame", 
+                 dynamic_ncols=True, position=0, leave=True, 
+                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            
+            for img_path in pbar:
+                # Suppress YOLO's print output by redirecting stdout temporarily
+                import sys
+                from io import StringIO
+                
+                # Capture YOLO's output
+                old_stdout = sys.stdout
+                sys.stdout = StringIO()
+                
+                try:
+                    self.annotator.annotate_frame(img_path)
+                finally:
+                    # Restore stdout
+                    sys.stdout = old_stdout
+
+        print()  # Add space after progress bar
+        logging.info(f"✅ YOLO annotations complete. Labels saved in: {self.config['labels_dir']}")
+    
+    def prepare_yolo_dataset(self):
+        """Organize data into YOLO dataset structure"""
+        logging.info("=== STEP 3: Preparing YOLO dataset structure ===")
+        
+        # Save class names
+        class_path = os.path.join(self.config['yolo_dataset_dir'], "obj.names")
+        with open(class_path, "w") as f:
+            for c in self.config['classes']:
+                f.write(c + "\n")
+        logging.info(f"Saved class labels to: {class_path}")
+
+        # Copy images
+        image_count = 0
+        for fname in os.listdir(self.config['frames_dir']):
+            if fname.endswith('.jpg'):
+                src = os.path.join(self.config['frames_dir'], fname)
+                dst = os.path.join(self.config['yolo_dataset_dir'], "images", fname)
+                shutil.copy(src, dst)
+                image_count += 1
+
+        # Copy labels
+        label_count = 0
+        for fname in os.listdir(self.config['labels_dir']):
+            if fname.endswith('.txt'):
+                src = os.path.join(self.config['labels_dir'], fname)
+                dst = os.path.join(self.config['yolo_dataset_dir'], "labels", fname)
+                shutil.copy(src, dst)
+                label_count += 1
+
+        logging.info(f"✅ Copied {image_count} images and {label_count} label files to YOLO dataset structure.")
+    
+    def clean_dataset(self):
+        """Filter annotations to keep only specified classes and remove small bounding boxes"""
+        logging.info("=== STEP 4: Cleaning dataset (filtering classes and small boxes) ===")
+        
+        labels_dir = f"{self.config['yolo_dataset_dir']}/labels"
+        images_dir = f"{self.config['yolo_dataset_dir']}/images"
+        removed_count = 0
+        kept_count = 0
+        small_box_count = 0
+
+        for filename in os.listdir(labels_dir):
+            if not filename.endswith('.txt'):
+                continue
+
+            filepath = os.path.join(labels_dir, filename)
+            image_path = os.path.join(images_dir, filename.replace('.txt', '.jpg'))
+            
+            # Get image dimensions for height calculation
+            if os.path.exists(image_path):
+                img = cv2.imread(image_path)
+                img_height, img_width = img.shape[:2]
+            else:
+                # Fallback if image not found
+                img_height, img_width = 1080, 1920  # Default dimensions
+            
+            with open(filepath, 'r') as file:
+                lines = file.readlines()
+
+            # Filter to keep only specified classes and remove small boxes
+            filtered_lines = []
+            for line in lines:
+                line = line.strip()
+                if line:
+                    parts = line.split()
+                    cls = int(parts[0])
+                    
+                    # Check if class is in keep_classes
+                    if cls in self.config['keep_classes']:
+                        # Check bounding box height (convert from normalized to pixel coordinates)
+                        if len(parts) >= 5:
+                            _, center_y, _, _, height_norm = map(float, parts[:5])
+                            height_pixels = height_norm * img_height
+                            
+                            # Keep only boxes with height >= minimum threshold
+                            min_height = self.config.get('min_box_height', 150)
+                            if height_pixels >= min_height:
+                                filtered_lines.append(line + '\n')
+                                kept_count += 1
+                            else:
+                                small_box_count += 1
+                        else:
+                            # If we can't parse the line properly, keep it
+                            filtered_lines.append(line + '\n')
+                            kept_count += 1
+
+            # Write back filtered lines
+            with open(filepath, 'w') as file:
+                file.writelines(filtered_lines)
+
+            removed = len(lines) - len(filtered_lines)
+            removed_count += removed
+
+        min_height = self.config.get('min_box_height', 150)
+        logging.info(f"✅ Cleaned YOLO labels in '{labels_dir}'")
+        logging.info(f"Kept {kept_count} objects, removed {removed_count} objects total")
+        logging.info(f"Removed {small_box_count} bounding boxes with height < {min_height} pixels")
+    
+    def convert_to_cvat(self):
+        """Convert annotations to CVAT format"""
+        return self.annotator.convert_to_cvat()
+    
     def run_full_pipeline(self):
         """Run the complete annotation automation pipeline"""
         logging.info("🚀 Starting Annotation Automation Pipeline")
@@ -1086,10 +1162,16 @@ def main():
         if args.keep_classes:
             config['keep_classes'] = [int(c.strip()) for c in args.keep_classes.split(',')]
         if args.output_dir:
-            config['frames_dir'] = f"{args.output_dir}_frames"
-            config['labels_dir'] = f"{args.output_dir}_labels"
-            config['yolo_dataset_dir'] = f"{args.output_dir}_dataset"
-            config['cvat_output_dir'] = f"{args.output_dir}_cvat"
+            # Create subdirectories inside the output directory
+            config['frames_dir'] = os.path.join(args.output_dir, 'frames')
+            config['labels_dir'] = os.path.join(args.output_dir, 'labels')
+            config['yolo_dataset_dir'] = os.path.join(args.output_dir, 'yolo_dataset')
+            
+            # Set output directory based on annotation type
+            if args.annotation_type == 'bbox_with_skeleton':
+                config['coco_output_dir'] = os.path.join(args.output_dir, 'coco_format')
+            else:
+                config['cvat_output_dir'] = os.path.join(args.output_dir, 'cvat_format')
         
         # Handle pose model configuration
         if args.annotation_type == 'bbox_with_skeleton':
@@ -1123,10 +1205,7 @@ def main():
             print(f"🤖 Pose model used: {config.get('pose_model_path', 'yolov8m-pose.pt')}")
         
         if config['enable_cvat_conversion']:
-            if annotation_type == 'bbox_only':
-                print(f"📋 CVAT format ready at: {config['cvat_output_dir']}")
-            else:
-                print(f"📋 COCO keypoints JSON ready at: {config['cvat_output_dir']}/person_keypoints.json")
+            print(tool.annotator.get_output_info())
         print("="*60)
     else:
         print("\n❌ Pipeline failed. Check logs above for details.")
