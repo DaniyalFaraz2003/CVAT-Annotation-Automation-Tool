@@ -241,9 +241,9 @@ def interactive_config():
     print("-" * 30)
     
     while True:
-        video_path = input("Enter video file path (or press Enter for 'video11.mp4'): ").strip()
+        video_path = input("Enter video file path (or press Enter for 'video.mp4'): ").strip()
         if not video_path:
-            video_path = 'video11.mp4'
+            video_path = 'video.mp4'
         
         if os.path.exists(video_path):
             video_info = get_video_info(video_path)
@@ -375,40 +375,23 @@ def interactive_config():
     print("-" * 30)
     
     print("You can specify a main output directory where all generated files will be organized.")
-    output_dir = input("Main output directory (or press Enter to use current directory): ").strip()
+    output_dir = input("Main output directory (or press Enter for 'output'): ").strip()
     
-    if output_dir:
-        # Create subdirectories inside the main output directory
-        config.update({
-            'frames_dir': os.path.join(output_dir, 'frames'),
-            'labels_dir': os.path.join(output_dir, 'labels'),
-            'yolo_dataset_dir': os.path.join(output_dir, 'yolo_dataset')
-        })
-        
-        # Set output directory based on annotation type
-        if config.get('annotation_type') == 'bbox_with_skeleton':
-            config['coco_output_dir'] = os.path.join(output_dir, 'coco_format')
-        else:
-            config['cvat_output_dir'] = os.path.join(output_dir, 'cvat_format')
+    if not output_dir:
+        output_dir = 'output'
+    
+    # Create subdirectories inside the main output directory
+    config.update({
+        'frames_dir': os.path.join(output_dir, 'frames'),
+        'labels_dir': os.path.join(output_dir, 'labels'),
+        'yolo_dataset_dir': os.path.join(output_dir, 'yolo_dataset')
+    })
+    
+    # Set output directory based on annotation type
+    if config.get('annotation_type') == 'bbox_with_skeleton':
+        config['coco_output_dir'] = os.path.join(output_dir, 'coco_format')
     else:
-        # Use individual directory names in current directory
-        frames_dir = input("Frames directory (or press Enter for 'frames'): ").strip() or 'frames'
-        labels_dir = input("Labels directory (or press Enter for 'yolo_labels'): ").strip() or 'yolo_labels'
-        yolo_dataset_dir = input("YOLO dataset directory (or press Enter for 'yolo_dataset'): ").strip() or 'yolo_dataset'
-        
-        config.update({
-            'frames_dir': frames_dir,
-            'labels_dir': labels_dir,
-            'yolo_dataset_dir': yolo_dataset_dir
-        })
-        
-        # Set output directory based on annotation type
-        if config.get('annotation_type') == 'bbox_with_skeleton':
-            coco_output_dir = input("COCO output directory (or press Enter for 'coco_format'): ").strip() or 'coco_format'
-            config['coco_output_dir'] = coco_output_dir
-        else:
-            cvat_output_dir = input("CVAT output directory (or press Enter for 'cvat_format'): ").strip() or 'cvat_format'
-            config['cvat_output_dir'] = cvat_output_dir
+        config['cvat_output_dir'] = os.path.join(output_dir, 'cvat_format')
     
     # Class configuration
     print(f"\n🏷️  CLASS CONFIGURATION")
@@ -480,8 +463,8 @@ def interactive_config():
             except ValueError:
                 print("❌ Please enter a valid number")
     
-    enable_cvat = input("\nEnable CVAT format conversion? (y/n, default: y): ").strip().lower()
-    config['enable_cvat_conversion'] = enable_cvat != 'n'
+    # Always enable conversion based on annotation type
+    config['enable_cvat_conversion'] = True
     
     return config
 
@@ -494,7 +477,8 @@ def parse_arguments():
 Examples:
   python annotation_automation_tool.py                    # Interactive mode
   python annotation_automation_tool.py --video video.mp4  # Quick start with video
-  python annotation_automation_tool.py --config config.json # Load from config file
+  python annotation_automation_tool.py --output-dir my_project  # Use custom output directory
+  python annotation_automation_tool.py --annotation-type bbox_with_skeleton  # With skeleton keypoints
         """
     )
     
@@ -1121,9 +1105,8 @@ class AnnotationAutomationTool:
         if self.config['enable_cleaning']:
             self.clean_dataset()
         
-        # Step 5: Convert to CVAT
-        if self.config['enable_cvat_conversion']:
-            self.convert_to_cvat()
+        # Step 5: Convert to CVAT/COCO
+        self.convert_to_cvat()
         
         logging.info("=" * 50)
         logging.info("🎉 Annotation Automation Pipeline Complete!")
@@ -1141,7 +1124,7 @@ def main():
     else:
         # Command line mode
         config = {
-            'video_path': args.video or 'video11.mp4',
+            'video_path': args.video or 'video.mp4',
             'model_path': args.model or 'yolov8n.pt',
             'target_fps': args.fps or 10,
             'frames_dir': 'frames',
@@ -1151,7 +1134,7 @@ def main():
             'classes': ['person', 'car', 'bicycle'],
             'keep_classes': [0],
             'enable_cleaning': not args.no_cleaning,
-            'enable_cvat_conversion': not args.no_cvat,
+            'enable_cvat_conversion': True,  # Always enable conversion
             'annotation_type': args.annotation_type,
             'use_pose_model': args.annotation_type == 'bbox_with_skeleton',
         }
@@ -1161,17 +1144,19 @@ def main():
             config['classes'] = [c.strip() for c in args.classes.split(',')]
         if args.keep_classes:
             config['keep_classes'] = [int(c.strip()) for c in args.keep_classes.split(',')]
-        if args.output_dir:
-            # Create subdirectories inside the output directory
-            config['frames_dir'] = os.path.join(args.output_dir, 'frames')
-            config['labels_dir'] = os.path.join(args.output_dir, 'labels')
-            config['yolo_dataset_dir'] = os.path.join(args.output_dir, 'yolo_dataset')
-            
-            # Set output directory based on annotation type
-            if args.annotation_type == 'bbox_with_skeleton':
-                config['coco_output_dir'] = os.path.join(args.output_dir, 'coco_format')
-            else:
-                config['cvat_output_dir'] = os.path.join(args.output_dir, 'cvat_format')
+        # Set output directory (default to 'output' if not specified)
+        output_dir = args.output_dir or 'output'
+        
+        # Create subdirectories inside the output directory
+        config['frames_dir'] = os.path.join(output_dir, 'frames')
+        config['labels_dir'] = os.path.join(output_dir, 'labels')
+        config['yolo_dataset_dir'] = os.path.join(output_dir, 'yolo_dataset')
+        
+        # Set output directory based on annotation type
+        if args.annotation_type == 'bbox_with_skeleton':
+            config['coco_output_dir'] = os.path.join(output_dir, 'coco_format')
+        else:
+            config['cvat_output_dir'] = os.path.join(output_dir, 'cvat_format')
         
         # Handle pose model configuration
         if args.annotation_type == 'bbox_with_skeleton':
@@ -1204,8 +1189,7 @@ def main():
         if config.get('use_pose_model', False):
             print(f"🤖 Pose model used: {config.get('pose_model_path', 'yolov8m-pose.pt')}")
         
-        if config['enable_cvat_conversion']:
-            print(tool.annotator.get_output_info())
+        print(tool.annotator.get_output_info())
         print("="*60)
     else:
         print("\n❌ Pipeline failed. Check logs above for details.")
